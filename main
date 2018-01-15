@@ -1,0 +1,687 @@
+#include <Arduino.h>
+#include <OneWire.h>
+#include <DallasTemperature.h>
+#include <SPI.h>
+#include <Ethernet.h>
+byte mac[] = {0xDE, 0xAD, 0xBE, 0xEF, 0xFE, 0xFE};
+IPAddress ip(192, 168, 0, 170);
+EthernetServer server(80);
+
+//#define TEMPERATURE_PRECISION 12
+
+// pozice teplot v poli se musí shodovat s pozicí teploměru->relé spíná podle teploměru se stejným indexem
+String databazeJmen[6]; // indexy shodné s databaze[][]
+String radkyWeb[16]; // 0 - první řádek, 1 - druhý řádek....
+float databaze[21][6]; // [řádky][sloupce] v řádcích jsou indexy zařízení
+int pocet_rele = 5;
+unsigned long cas_do_zapnuti_cerpadla;
+unsigned long cas_do_vypnuti_cerpadla;
+
+class Web {
+private:
+    String tabulka(int pocet_radku);
+    String radek(int typR, int indexR);
+    String barva(int typB, int indexB);
+    int index;
+    int typ;
+    int poradi;
+
+    int updateInterval;
+    unsigned long lastUpdate;
+
+
+    String nazev;
+    float hodnota;
+
+public:
+    void delejWeb();
+    void delejWebRucne();
+    void update(int updateInterval); //  void pripravWeb();
+    Web(int typ);
+    //  int pocet_bunek();
+    //  int pocet_radku();
+
+};
+
+Web::Web(int typ) {
+    this->typ = typ;
+
+
+}
+
+void Web::delejWebRucne() {
+    Serial.println("znacka5");
+    EthernetClient client = server.available();
+    delay(10);
+    if (client) {
+        Serial.println("new client");
+        // an http request ends with a blank line
+        boolean currentLineIsBlank = true;
+        while (client.connected()) {
+            //  Serial.println("znacka8");
+            if (client.available()) {
+                char c = client.read();
+                Serial.write(c);
+                // if you've gotten to the end of the line (received a newline
+                // character) and the line is blank, the http request has ended,
+                // so you can send a reply
+                //Serial.println("znacka7");
+                if (c == '\n' && currentLineIsBlank) {
+                    // send a standard http response header
+                    client.println("HTTP/1.1 200 OK");
+                    client.println("Content-Type: text/html");
+                    client.println("Connection: close"); // the connection will be closed after completion of the response
+                    client.println("Refresh: 5"); // refresh the page automatically every 5 sec
+                    client.println();
+                    client.println("<!DOCTYPE HTML>");
+                    client.print("<html>");
+                    client.print("<head>");
+                    client.print("<style>");
+                    client.print("table, th, td {    border-collapse: 1px solid black;}");
+                    client.print("</style>");
+                    client.print("</head>");
+                    client.print("<body>");
+                    Serial.println("znacka9");
+                    //radek s hlavickou
+                    client.print("<table><tr><th style='background-color:#0AA0AA;color:#FFFFFF'>Mistnost</th><th style='background-color:#0AA0AA;color:#FFFFFF'>Teplota</th><th style='background-color:#0AA0AA;color:#FFFFFF'>Minimum</th><th style='background-color:#0AA0AA;color:#FFFFFF'>Maximum</th><th style='background-color:#0AA0AA;color:#FFFFFF'>Pozadovana teplota</th><th style='background-color:#0AA0AA;color:#FFFFFF'>Hystereze</th><th style='background-color:#0AA0AA;color:#FFFFFF'>Rele-stav</th></tr>");
+                    //radek 1 - čerpadlo
+                    client.print("<tr><td>");
+                    client.print(databazeJmen[0]);
+                    client.print("</td><td>do zapnuti: </td><td>");
+                    client.print(cas_do_zapnuti_cerpadla);
+                    client.print("</td><td>do vypnuti: </td><td>");
+                    client.print(cas_do_vypnuti_cerpadla);
+                    client.print("</td><td>");
+                    client.print("</td>");
+                    if (databaze[8][0] > 0) {
+                        client.print("<td style='background-color:#00FF00'>spusteno</td></tr>");
+                    } else {
+                        client.print("<td>vypnuto</td></tr>");
+                    }
+
+                    //další řáradky
+                    for (int i = 0; i < 6; i++) {
+                        int j = i + 1;
+                        client.print("<tr><td>");
+                        client.print(databazeJmen[j]);
+                        client.print("</td>");
+                        if (databaze[1][j]<(databaze[6][j] - databaze[7][j])) //pod minimem
+                        {
+                            client.print("<td style='background-color:#00AFFF'>");
+                        } else
+                            if (databaze[1][j]>(databaze[6][j] + databaze[7][j])) //nad maximem
+                        {
+                            client.print("<td style='background-color:#FFD000'>"); //optimum
+                        } else /*if ((databaze[1][j]>=(databaze[6][j]-databaze[7][j]))&&(databaze[1][j]<=(databaze[10][j]+databaze[11][j])))
+*/ {
+                            client.print("<td style='background-color:#00FF00'>");
+                        }
+                        client.print(databaze[1][j]);
+                        client.print("</td><td>");
+                        client.print(databaze[2][j]);
+                        client.print("</td><td>");
+                        client.print(databaze[3][j]);
+                        client.print("</td><td>");
+                        client.print(databaze[6][j]);
+                        client.print("</td><td>");
+                        client.print(databaze[7][j]);
+                        client.print("</td>");
+                        if (databaze[8][j] > 0) {
+                            client.print("<td style='background-color:#00FF00'>");
+                            client.print("otevreno</td></tr>");
+                        } else if (databaze[8][j] == 0) {
+                            client.print("<td>zavreno</td></tr>");
+                        }
+                    }
+                    client.print("</table>");
+                    //client.print("<hr width='50' size='10' color='black' align='center' noshade> ");
+                    client.print("<iframe src='http://192.168.0.177' width='600' height='1000'></iframe>");
+
+                    client.print("</body>");
+                    break;
+                }
+                if (c == '\n') {
+                    // you're starting a new line
+                    currentLineIsBlank = true;
+                } else if (c != '\r') {
+                    // you've gotten a character on the current line
+                    currentLineIsBlank = false;
+                }
+            }
+        }
+        // give the web browser time to receive the data
+        delay(1);
+        // close the connection:
+        client.stop();
+    }
+}
+
+/*
+String Web::tabulka(int pocet_radku) {
+    Serial.println("znacka10");
+    int delka = pocet_radku+2; // +0 <table> +1</table>
+int delkaI=delka+2;
+  Serial.println("znacka11");
+    String radekS[delkaI];
+    String tabulka;
+    radekS[0] = ("<table>");
+    radekS[1] = radek(0, 0);
+
+   for (int i = 0; i < 3; i++) {
+     int I = i+2;
+        radekS[I] = radek(1, I);
+        Serial.println("radek: ");
+        Serial.println(radekS[I]);
+  //Serial.println("znacka11");
+    radekS[delka] = ("</table>");
+  //  Serial.println("znacka111");
+}
+    for (int j = 0; j < 3; j++) {
+      Serial.println("znacka112");
+    tabulka = (tabulka + radekS[j]);
+    Serial.println("znacka113");
+    Serial.println(tabulka);
+  }
+    Serial.println("znacka12");
+    return tabulka;
+
+}
+
+String Web::radek(int typR, int indexR) //typ 0 = hlavička ->napevno definovaná, typ 1 = datový řádek, dle indexu, typ 2 poslední řádek s čerpadlem
+{
+    switch (typR) {
+        case 0:
+            return ("<tr><th style='background-color:#0AA0AA;color:#FFFFFF'>Mistnost</th><th style='background-color:#0AA0AA;color:#FFFFFF'>Teplota</th><th style='background-color:#0AA0AA;color:#FFFFFF'>Minimum</th><th style='background-color:#0AA0AA;color:#FFFFFF'>Maximum</th><th style='background-color:#0AA0AA;color:#FFFFFF'>Pozadovana teplota</th><th style='background-color:#0AA0AA;color:#FFFFFF'>Hystereze</th><th style='background-color:#0AA0AA;color:#FFFFFF'>Rele-stav</th></tr>");
+Serial.println("znacka13");
+            break;
+
+        case 1:
+        Serial.println("znacka131");
+            String td = ("<td>");
+            String td2 = ("</td>");
+            String td3 = ("</td><td>");
+            //poradi: jméno; teplota; minimum; maximum; pozadavek; hystereze; relé zastav
+            String jmeno = databazeJmen[indexR];
+Serial.println("znacka1311");
+            char cislo[5];
+            dtostrf(databaze[1][indexR], 2, 2, cislo);
+            String teplotaB = cislo;
+Serial.println("znacka132d");
+char cislo2[5];
+            dtostrf(databaze[2][indexR], 2, 2, cislo2);
+            String minimumB = cislo2;
+Serial.println("znacka133d");
+char cislo3[5];
+            dtostrf(databaze[3][indexR], 2, 2, cislo3);
+            String maximumB = cislo3;
+            Serial.println("znacka134d");
+            char cislo4[5];
+            dtostrf(databaze[6][indexR], 2, 2, cislo4);
+            String pozadavekB = cislo4;
+            Serial.println("znacka135d");
+            char cislo5[5];
+            dtostrf(databaze[7][indexR], 2, 2, cislo5);
+            String hysterezeB = cislo5;
+Serial.println("znaceka 136");
+            String barvaB = barva(2, indexR);
+            String barvaR;
+            String rele;
+Serial.println("znacka 131a");
+            if (databaze[8][indexR] > 0) {
+              Serial.println("znacka14");
+                barvaR = ("<td style='background-color:#00FF00'>"); // zelena
+                rele = ("otevreno");
+                Serial.println("znacka 132");
+            } else {
+                barvaR = ("<td>"); //bez barvy
+                rele = ("zavreno");
+                Serial.println("znacka 133");
+            }
+            Serial.println("znacka 134");
+
+            String vysledek;
+            Serial.println("znacka 135");
+            vysledek = (td + jmeno + td2 + barvaB + teplotaB + td3 + minimumB + td3 + maximumB + td3 + pozadavekB + td3 + hysterezeB + td2 + barvaR + rele + td2);
+Serial.println(vysledek);
+            return vysledek;
+            Serial.println("znacka16");
+            break;
+    }
+}
+
+String Web::barva(int typB, int indexB) {
+    switch (typB) {
+        case 1:
+            return ("<td>");
+            break;
+
+        case 2:
+            if ((databaze [1][indexB])<((databaze[6][indexB]) - databaze[7][indexB])) {
+                return ("<td style='background-color:#00AFFF'>"); //modrá
+                break;
+            } else
+                if ((databaze [1][indexB])>((databaze[6][indexB]) + databaze[7][indexB])) {
+                return ("<td style='background-color:#FFD000'>"); // oranžová
+                break;
+            } else
+                if (((databaze [1][indexB]) >= ((databaze[6][indexB]) - databaze[7][indexB]))&&((databaze [1][indexB]) <= ((databaze[6][indexB]) + databaze[7][indexB]))) {
+                return ("<td style='background-color:#00FF00'>"); //zelená
+                break;
+            }
+            break;
+    }
+}
+
+void Web::delejWeb() {
+    Serial.println("znacka5");
+    EthernetClient client = server.available();
+    delay(10);
+    if (client) {
+        Serial.println("new client");
+        // an http request ends with a blank line
+      boolean currentLineIsBlank = true;
+        while (client.connected()) {
+          //  Serial.println("znacka8");
+            if (client.available()) {
+                char c = client.read();
+                Serial.write(c);
+                delay(10);
+                // if you've gotten to the end of the line (received a newline
+                // character) and the line is blank, the http request has ended,
+                // so you can send a reply
+                //Serial.println("znacka7");
+              if (c == '\n' && currentLineIsBlank) {
+                    // send a standard http response header
+                    Serial.println("znacka6");
+                    client.println("HTTP/1.1 200 OK");
+                    Serial.println("znacka61");
+                    client.println("Content-Type: text/html");
+                    Serial.println("znacka62");
+                    client.println("Connection: close");
+                    Serial.println("znacka63"); // the connection will be closed after completion of the response
+                    client.println("Refresh: 5"); // refresh the page automatically every 5 sec
+                    client.println();
+                    client.println("<!DOCTYPE HTML>");
+                    client.print("<html>");
+                    client.print("<head>");
+                    client.print("<style>");
+                    client.print("table, th, td {    border: 1px solid black;}");
+                    client.print("</style>");
+                    client.print("</head>");
+                    client.print("<body>");
+                    Serial.println("znacka9");
+                    client.print(tabulka(6));
+                    Serial.println(tabulka(6));
+                    client.print("</body>");
+                }
+
+            }
+        }
+    }
+}
+
+
+void Web::pripravWeb() {
+    Serial.println("znacka");
+    //hlavička
+    radkyWeb[0] = ("<tr><th style='background-color:#0AA0AA;color:#FFFFFF'>Teplomer</th><th style='background-color:#0AA0AA;color:#FFFFFF'>Hodnota</th><th style='background-color:#0AA0AA;color:#FFFFFF'>Minimum</th><th style='background-color:#0AA0AA;color:#FFFFFF'>Maximum</th><th style='background-color:#0AA0AA;color:#FFFFFF'>Jednotka</th></tr>");
+    //Serial.println("znacka1");
+    //Teplomery
+    for (int i = 1; i < 7; i++) {
+        //Serial.println("znacka2");
+        char cislo[5];
+        int index_teplomeru = (i);
+        float minimumW = databaze[2][index_teplomeru];
+        float maximumW = databaze[3][index_teplomeru];
+        float hodnotaW = databaze[1][index_teplomeru];
+        String zacatek = ("<tr><td>");
+        String jmeno = (databazeJmen[i]);
+        String zajmenem = ("</td>");
+        String barva;
+        if (hodnotaW > maximumW) {
+            barva = ("<td style='background-color:#FFD000'>");
+        } else if (hodnotaW <= maximumW && hodnotaW > minimumW) {
+            barva = ("<td style='background-color:#00FF00'>");
+        } else if (hodnotaW <= minimumW) {
+            barva = ("<td style='background-color:#00AFFF'>");
+        }
+
+        dtostrf(hodnotaW, 2, 2, cislo);
+        String hodnota = cislo;
+        String dalsibunka = ("</td><td>");
+        dtostrf(maximumW, 2, 2, cislo);
+        String maximum = cislo;
+        dtostrf(minimumW, 2, 2, cislo);
+        String minimum = cislo;
+        String konec = ("\377C</td></tr>");
+        radkyWeb[i] = (zacatek + jmeno + zajmenem + barva + hodnota + dalsibunka + maximum + dalsibunka + minimum + dalsibunka + konec);
+        //Serial.println(zacatek + jmeno + zajmenem + barva + hodnota + dalsibunka + maximum +dalsibunka + minimum +dalsibunka +konec);
+    }
+}*/
+
+void Web::update(int updateInterval) {
+
+    if ((millis() - lastUpdate) > updateInterval) // time to update
+    {
+
+        //this->pripravWeb();
+        //  Serial.println("znacka4");
+        this->delejWebRucne();
+        lastUpdate = millis();
+    }
+}
+
+class Hlavice {
+private:
+    String nazev;
+    int pin;
+    int index;
+    float pozadovana_teplota;
+    float hystereze;
+    float aktualni_teplota; // pin nazev kterém je relé připojené
+    int updateInterval; // interval between updates
+    unsigned long lastUpdate; // last update of position
+
+public:
+    Hlavice::Hlavice(String nazev, int pin, int index, float pozadovana_teplota, float hystereze);
+    void reguluj();
+    void update(int updateInterval);
+};
+
+Hlavice::Hlavice(String nazev, int pin, int index, float pozadovana_teplota, float hystereze) {
+    this->nazev = nazev;
+    this->pin = pin;
+    this->index = index;
+    this->pozadovana_teplota = pozadovana_teplota;
+    this->hystereze = hystereze;
+    pinMode(this->pin, OUTPUT);
+    databaze[6][this->index] = pozadovana_teplota;
+    databaze[7][this->index] = hystereze;
+    databazeJmen[this->index] = nazev;
+}
+
+void Hlavice::reguluj() {
+    if (databaze[1][this->index]>(databaze[6][this->index] + databaze[7][this->index])) {
+        digitalWrite(this->pin, HIGH);
+        databaze[8][this->index] = 0;
+    } else
+        if (databaze[1][this->index]<(databaze[6][this->index] - databaze[7][this->index])) {
+        digitalWrite(this->pin, LOW); //pod napětím je to zavřené
+        databaze[8][this->index] = 1;
+    } /*else
+        {
+                digitalWrite(this->pin, LOW);
+                databaze[8][this->index]=0;
+                Serial.print("chyba při ovládání relé: ");
+                Serial.println(this->index);
+        }*/
+}
+
+void Hlavice::update(int updateInterval) {
+    if ((millis() - lastUpdate) > updateInterval) // time to update
+    {
+        this->reguluj();
+        lastUpdate = millis();
+    }
+}
+
+class Cerpadlo {
+private:
+    String nazev = "cerpadlo";
+    int pin;
+    int index = 0; //vždy musí být 0
+    unsigned long updateInterval; // interval between updates
+    unsigned long lastUpdate; // last update of position
+
+public:
+    Cerpadlo(int pin);
+    void reguluj();
+    void zastav();
+    void update(unsigned long beh, unsigned long pauza);
+
+};
+
+Cerpadlo::Cerpadlo(int pin) {
+    this->pin = pin;
+    pinMode(this->pin, OUTPUT);
+    databazeJmen[0] = ("Cerpadlo");
+}
+
+void Cerpadlo::reguluj() {
+    int soucet = 0;
+    for (int i = 1; i <= pocet_rele; i++) // od jedné, protože vynechávám stav čerpadla
+    {
+        if (databaze[8][i] > 0) {
+            soucet = soucet + 1;
+            //Serial.print("soucet: ");
+            //Serial.println(soucet);
+        }
+    }
+    if (soucet > 0) {
+        databaze[8][0] = 1;
+        digitalWrite(this->pin, HIGH);
+        //Serial.println("čerpadlo zapnuto");
+    } else {
+        databaze[8][0] = 0;
+        digitalWrite(this->pin, LOW);
+        // Serial.println("čerpadlo vypnuto");
+    }
+}
+
+void Cerpadlo::zastav() {
+    databaze[8][0] = 0;
+    digitalWrite(this->pin, LOW);
+    //Serial.println("čerpadlo vypnuto");
+
+}
+
+void Cerpadlo::update(unsigned long beh, unsigned long pauza) {
+    cas_do_vypnuti_cerpadla = ((beh - (millis() - lastUpdate)) / 60000);
+    cas_do_zapnuti_cerpadla = (((beh + pauza)-(millis() - lastUpdate)) / 60000);
+
+    if ((millis() - lastUpdate) < beh) // time to update
+    {
+        this->reguluj();
+        //Serial.print("reguluje");
+        //Serial.println((millis()-lastUpdate));
+
+    } else if ((millis() - lastUpdate)<(beh + pauza)) {
+
+        this->zastav();
+        //Serial.print("zastav");
+        //  Serial.println((millis()-lastUpdate));;
+
+    } else if ((millis() - lastUpdate)>(beh + pauza)) {
+        //Serial.print("restart");
+        //Serial.println((millis()-lastUpdate));
+        lastUpdate = millis();
+    }
+}
+
+class Cidlo {
+private:
+    String nazev;
+    int pin;
+    int index;
+    long lastUpdate;
+    unsigned long updateInterval;
+
+public:
+    Cidlo(String nazev, int pi, int index);
+    void mer();
+    void spust();
+    void vypis();
+    void update(int updateInterval);
+};
+
+Cidlo::Cidlo(String nazev, int pi, int index) {
+    this->nazev = nazev;
+    this->pin = pi;
+    this->index = index;
+    databaze[2][index] = 500;
+}
+
+void Cidlo::mer() {
+
+    //  Serial.print("merim ");
+
+    // Serial.print(" DS ");
+    int sensor_pin = pin;
+    //returns the temperature from one DS18S20 in DEG Celsius
+    OneWire ds(sensor_pin);
+    byte data[12];
+    byte addr[8];
+
+
+    //    if (addr[0] == DS18B20) // check we are really using a DS18B20
+    //  	{
+
+
+    //	}
+
+
+    if (!ds.search(addr)) {
+        //no more sensors on chain, reset search
+        ds.reset_search();
+        //return -1001;
+        databaze[1][index] = 1001;
+        Serial.println(" zapsano 1");
+    }
+    if (OneWire::crc8(addr, 7) != addr[7]) {
+        Serial.println("CRC is not valid!");
+        // return -1002;
+        databaze[1][index] = 1002;
+        Serial.println(" zapsano 2");
+    }
+    if (addr[0] != 0x10 && addr[0] != 0x28) {
+        Serial.print("Device is notrecognized");
+        //return -1003;
+        databaze[1][index] = 1003;
+        Serial.println(" zapsano 3");
+    }
+    /*
+
+    //nastavení rozlišení teploměru
+    ds.reset(); // rest 1-Wire
+    ds.select(addr); // select DS18B20
+
+    ds.write(0x4E); // write on scratchPad
+    ds.write(0x00); // User byte 0 - Unused
+    ds.write(0x00); // User byte 1 - Unused
+    ds.write(0x7F); // set up en 12 bits (0x7F)
+
+    ds.reset(); // reset 1-Wire
+    ds.select(addr); // select DS18B20
+
+    ds.write(0x48); // copy scratchpad to EEPROM
+    delay(15); // wait for end of write
+     */
+    ds.reset();
+    ds.select(addr);
+    ds.write(0x44, 1); // start conversion, with parasite power on at the end
+    byte present = ds.reset();
+    ds.select(addr);
+    ds.write(0xBE); // Read Scratchpad
+    for (int i = 0; i < 9; i++) { // we need 9 bytes
+        data[i] = ds.read();
+    }
+    ds.reset_search();
+    byte MSB = data[1];
+    byte LSB = data[0];
+    float tempRead = ((MSB << 8) | LSB); //using two's compliment
+    float TemperatureSum = tempRead / 16;
+    // return TemperatureSum;
+    // Serial.print(" zmereno :");
+    // Serial.print(TemperatureSum);
+    //Serial.print("index ");
+    //  Serial.println(index);
+    databaze[1][index] = TemperatureSum;
+    // Serial.println(databaze[1][index]);
+    //  Serial.print(" zapsano ");
+    if (databaze[1][index] > databaze[3][index]) {
+        databaze[3][index] = databaze[1][index];
+    }
+    if (databaze[1][index] < databaze[2][index]) {
+        databaze[2][index] = databaze[1][index];
+    }
+}
+
+void Cidlo::update(int updateInterval) {
+    if ((millis() - lastUpdate) > updateInterval) // time to update
+    {
+        this->mer();
+        lastUpdate = millis();
+    }
+}
+
+Cerpadlo C(37);
+
+Cidlo T1("Obyvak", 42, 1); //0 je vyhrazená pro čerpadlo a ani teploměr ji nesmí obsadit
+Cidlo T2("Jidelna", 42, 2);
+Cidlo T3("Pracovna", 44, 3);
+Cidlo T4("Loznice", 46, 4);
+Cidlo T5("Pokoj sever", 48, 5);
+//Cidlo T6("Pokoj Vitek", 32, 6);
+
+Hlavice H1("Obyvak", 33, 1, 18.5, 0.2); //nazev, index, pin, pozadovana teplota, hystereze
+Hlavice H2("Jidelna", 31, 2, 19.3, 0.2);
+Hlavice H3("Pracovna", 29, 3, 18.2, 0.2);
+Hlavice H4("Loznice", 27, 4, 20, 0.2);
+Hlavice H5("Pokoj sever", 25, 5, 19.5, 0.2);
+//Hlavice H6("Pokoj Vitek", 23, 6, 20, 0.2);
+Web W(1);
+
+void setup() {
+    Serial.begin(115200);
+    // put your main code here, to run repeatedly:
+    Serial.println("setup");
+    T1.mer();
+    Serial.println("1");
+    delay(500); //T1 i T2 jsou stejne - cas to rozdejchat
+    T2.mer();
+    Serial.println("2");
+    T3.mer();
+    Serial.println("3");
+    T4.mer();
+    Serial.println("4");
+    T5.mer();
+    Serial.println("5");
+    //  T6.mer();
+    Serial.println("6");
+    Ethernet.begin(mac, ip);
+    server.begin();
+    Serial.print("Server is at ");
+    Serial.println(Ethernet.localIP());
+}
+
+void loop() {
+    T1.update(6000);
+    T2.update(15550); //T1 i T2 jsou stejne tepl.
+    T3.update(6000);
+    T4.update(6000);
+    T5.update(6000);
+    //T6.update(3000);
+    H1.update(20000);
+    H2.update(20000);
+    H3.update(20000);
+    H4.update(20000);
+    H5.update(20000);
+    //H6.update(10000);
+    C.update(1800000, 6000000);
+    W.update(1000); /* /*
+
+Serial.print("měřené hodnoty: idnex ");
+for (int a=1; a<=2; a++)
+{
+  Serial.print(a);
+  Serial.print("=");
+  Serial.print(databaze[1][a]);
+  Serial.print(" ");
+  Serial.print("stav relé: ");
+  Serial.print(a);
+  Serial.print("=");
+  Serial.print(databaze[8][a]);
+  Serial.print(" ");
+}
+Serial.println();*/
+}
